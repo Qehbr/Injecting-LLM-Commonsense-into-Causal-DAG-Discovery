@@ -1,0 +1,17 @@
+PKC,PKA
+PKA,Raf
+PKA,Mek
+Raf,Mek
+Mek,Erk
+PKA,Erk
+Erk,Akt
+PKA,Akt
+PKC,Raf
+PKC,Mek
+Plcg,PIP2
+Plcg,PIP3
+PIP2,PKC
+PIP3,Akt
+PKC,Jnk
+PKA,Jnk
+PKC,P38
