@@ -1,6 +1,7 @@
 # project/algorithms/algorithm_factory.py
 from .ges_algorithm import GESAlgorithm
 from .pc_algorithm import PCAlgorithm  # Import PCAlgorithm
+from .dag_gnn_algorithm import DAG_GNN_Algorithm
 
 
 class AlgorithmFactory:
@@ -52,6 +53,12 @@ class AlgorithmFactory:
                                indep_test_override=indep_test,
                                stable=stable,
                                parameters_override=common_params)  # Pass the full dict for other PC params
+
+        elif algo_name_lower == "dag-gnn":
+            # DAG-GNN takes a general parameter dictionary
+            dagnn_params = common_params.get("dag-gnn", common_params)
+            return DAG_GNN_Algorithm(data_type=data_type,
+                                     parameters_override=dagnn_params)
 
         # Add more algorithms here as elif blocks
         else:
