@@ -6,6 +6,10 @@ import time
 import torch
 import os
 
+import warnings
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 from utils.data_processing import (
@@ -46,7 +50,7 @@ DATASETS_CONFIG = [
         "algo_params_override": {
             "ges": {"bdeu_sample_prior": 10.0},
             "pc": {"alpha": 0.05, "indep_test": "gsq"},
-            "dag-gnn": DAG_GNN_SUGGESTED_PARAMS
+            "dag-gnn": {**DAG_GNN_SUGGESTED_PARAMS, 'z_dims': 3}
         }
     },
     {
@@ -94,10 +98,20 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
         if verbose_eval: print(f"  Warning/Error loading GT: {e}")
 
     # Prepare data shape (DAG-GNN expects 3D)
-    if data_np_orig.ndim == 2:
-        data_np_for_algo = np.expand_dims(data_np_orig, axis=2)
-    else:
-        data_np_for_algo = data_np_orig
+    if algorithm_name.lower() == "dag-gnn":
+        if data_np_orig.ndim == 2:
+            data_np_for_algo = np.expand_dims(data_np_orig, axis=2)
+        else:
+            data_np_for_algo = data_np_orig  # Assuming it's already 3D if not 2D
+    else:  # For GES, PC, etc.
+        if data_np_orig.ndim == 3 and data_np_orig.shape[2] == 1:
+            data_np_for_algo = np.squeeze(data_np_orig, axis=2)
+        elif data_np_orig.ndim == 2:
+            data_np_for_algo = data_np_orig
+        else:
+            # Handle other cases or raise an error if unexpected shape for GES/PC
+            print(f"Warning: Unexpected data shape {data_np_orig.shape} for {algorithm_name}. Attempting to use as is.")
+            data_np_for_algo = data_np_orig
 
     if verbose_eval: print(f"  Data loaded: {data_np_orig.shape[0]} samples, {data_np_orig.shape[1]} variables.")
 
