@@ -15,7 +15,7 @@ class MLPEncoder(nn.Module):
         super(MLPEncoder, self).__init__()
 
         init_adj_A = torch.from_numpy(adj_A).double()
-        nn.init.uniform_(init_adj_A, a=-0.05, b=0.05)
+        nn.init.uniform_(init_adj_A, a=-1.0, b=1.0)
         self.adj_A = nn.Parameter(Variable(init_adj_A, requires_grad=True))
 
         self.Wa = nn.Parameter(torch.zeros(n_out, dtype=torch.double), requires_grad=True)
@@ -52,7 +52,7 @@ class MLPDEncoder(nn.Module):
         super(MLPDEncoder, self).__init__()
 
         init_adj_A = torch.from_numpy(adj_A).double()
-        nn.init.uniform_(init_adj_A, a=-0.05, b=0.05)
+        nn.init.uniform_(init_adj_A, a=-1.0, b=1.0)
         self.adj_A = nn.Parameter(Variable(init_adj_A, requires_grad=True))
 
         self.embed = nn.Embedding(num_classes, n_hid)

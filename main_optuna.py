@@ -6,6 +6,7 @@ import optuna
 import time
 import torch
 import os
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 from utils.data_processing import (
@@ -66,37 +67,36 @@ def dagnn_objective(trial, dataset_config_entry, base_output_folder="optuna_runs
     print(f"\n--- Optuna Trial #{trial_num} for DAG-GNN on {dataset_id_str} (Optimizing SHD) ---")
 
     if trial_num == 0:
-        # First trial: use exact defaults
+        # More aggressive first trial
         suggested_params = {
-            "epochs": 300,
-            "lr": 3e-3,
+            "epochs": 200,
+            "lr": 0.05,  # Much higher
             "batch_size": 100,
-            "lambda_A": 0.01,
-            "c_A": 1.0,
-            "k_max_iter": 150,
-            "graph_threshold": 0.3,
+            "lambda_A": 0.0,  # No initial lambda
+            "c_A": 0.1,  # Start very small
+            "k_max_iter": 5,  # Very few iterations
+            "graph_threshold": 0.01,  # Much lower threshold
             "encoder_hidden": 64,
             "decoder_hidden": 64,
-            "z_dims": 1,
-            "h_tol": 1e-8,
+            "z_dims": 3,
+            "h_tol": 1e-5,  # Much less strict
+            "tau_A": 0.0,  # No L1 initially
             "seed": 42
         }
-        print("Using original DAG-GNN defaults for first trial")
     else:
-
         suggested_params = {
-            # Narrow ranges around defaults
-            "epochs": trial.suggest_int("epochs", 200, 500, step=50),  # Default: 300
-            "lr": trial.suggest_float("lr", 1e-3, 1e-2, log=True),  # Default: 3e-3
-            "batch_size": 100,
-            "lambda_A": trial.suggest_float("lambda_A", 0.005, 0.1, log=True),  # Default: 0.01
-            "c_A": trial.suggest_float("c_A", 0.5, 5.0, log=True),  # Default: 1.0
-            "k_max_iter": trial.suggest_int("k_max_iter", 100, 200, step=25),  # Default: 150
-            "graph_threshold": trial.suggest_float("graph_threshold", 0.2, 0.4, step=0.05),  # Default: 0.3
-            "encoder_hidden": trial.suggest_categorical("encoder_hidden", [32, 64, 96]),  # Default: 64
-            "decoder_hidden": trial.suggest_categorical("decoder_hidden", [32, 64, 96]),  # Default: 64
-            "z_dims": trial.suggest_int("z_dims", 1, 3),  # Default: 1
-            "h_tol": trial.suggest_float("h_tol", 1e-9, 1e-7, log=True),  # Default: 1e-8
+            "epochs": trial.suggest_int("epochs", 100, 300, step=50),
+            "lr": trial.suggest_float("lr", 0.01, 0.1, log=True),  # Higher range
+            "batch_size": trial.suggest_categorical("batch_size", [50, 100]),
+            "lambda_A": 0.0,  # Always 0
+            "c_A": trial.suggest_float("c_A", 0.01, 1.0, log=True),  # Lower range
+            "k_max_iter": trial.suggest_int("k_max_iter", 5, 20, step=5),  # Fewer iterations
+            "graph_threshold": trial.suggest_float("graph_threshold", 0.01, 0.1, step=0.01),  # Lower
+            "encoder_hidden": trial.suggest_categorical("encoder_hidden", [64, 128]),
+            "decoder_hidden": trial.suggest_categorical("decoder_hidden", [64, 128]),
+            "z_dims": trial.suggest_int("z_dims", 1, 5),
+            "h_tol": trial.suggest_float("h_tol", 1e-6, 1e-4, log=True),  # Less strict
+            "tau_A": 0.0,  # No L1 regularization
             "seed": 42
         }
         print(f"Optimizing around defaults - Trial {trial_num}")
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     PERFORM_OPTUNA_TUNING = True
     ALGORITHM_TO_TUNE = "dag-gnn"
     DATASETS_FOR_DAGNN_TUNING = ["asia_n2000", "sachs_continuous"]
-    N_OPTUNA_TRIALS_PER_DATASET = 5
+    N_OPTUNA_TRIALS_PER_DATASET = 20
     # Keep low for testing, increase for thorough search
 
     if PERFORM_OPTUNA_TUNING and ALGORITHM_TO_TUNE.lower() == "dag-gnn":

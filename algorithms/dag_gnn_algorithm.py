@@ -161,7 +161,8 @@ class DAG_GNN_Algorithm(BaseAlgorithm):
         best_elbo_loss = np.inf
 
         for step_k in range(int(args.k_max_iter)):
-            print(f"\n[Augmented Lagrangian Step {step_k + 1}/{int(args.k_max_iter)}] | c_A: {c_A:.2e}, lambda_A: {lambda_A:.2e}")
+            print(
+                f"\n[Augmented Lagrangian Step {step_k + 1}/{int(args.k_max_iter)}] | c_A: {c_A:.2e}, lambda_A: {lambda_A:.2e}")
             while c_A < 1e+20:
                 for epoch in range(args.epochs):
                     elbo_loss, origin_A = self._train_epoch(
@@ -190,6 +191,16 @@ class DAG_GNN_Algorithm(BaseAlgorithm):
 
         # Final graph extraction
         final_A = self.encoder.adj_A.data.clone().cpu().numpy()
+        print(f"\nLearned adjacency matrix statistics before thresholding:")
+        print(f"  Max absolute value: {np.max(np.abs(final_A)):.6f}")
+        print(f"  Mean absolute value: {np.mean(np.abs(final_A)):.6f}")
+        print(f"  Std of values: {np.std(final_A):.6f}")
+        print(f"  Number of values > 0.01: {np.sum(np.abs(final_A) > 0.01)}")
+        print(f"  Number of values > 0.05: {np.sum(np.abs(final_A) > 0.05)}")
+        print(f"  Number of values > 0.1: {np.sum(np.abs(final_A) > 0.1)}")
+        print(
+            f"  Number of values > threshold ({args.graph_threshold}): {np.sum(np.abs(final_A) > args.graph_threshold)}")
+
         final_A[np.abs(final_A) < args.graph_threshold] = 0
 
         self.learned_graph_cpdag_raw = np.zeros_like(final_A, dtype=int)
@@ -236,7 +247,11 @@ class DAG_GNN_Algorithm(BaseAlgorithm):
             h_A = _h_A(origin_A, self.args.data_variable_size)
             h_A_loss = lambda_A * h_A + 0.5 * c_A * h_A * h_A
 
-            loss = loss_nll + loss_kl + h_A_loss + sparse_loss
+            edge_penalty = -0.1 * torch.sum(torch.abs(origin_A))  # Negative to encourage edges
+            if torch.sum(torch.abs(origin_A)) < 1.0:  # If too few edges
+                edge_penalty *= 10  # Stronger penalty
+
+            loss = loss_nll + loss_kl + h_A_loss + sparse_loss + edge_penalty
 
             loss.backward()
             optimizer.step()
