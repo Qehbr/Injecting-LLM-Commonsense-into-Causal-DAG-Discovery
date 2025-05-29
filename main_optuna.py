@@ -96,7 +96,7 @@ def dagnn_objective(trial, dataset_config_entry, base_output_folder="optuna_runs
             "decoder_hidden": trial.suggest_categorical("decoder_hidden", [64, 128]),
             "z_dims": trial.suggest_int("z_dims", 1, 5),
             "h_tol": trial.suggest_float("h_tol", 1e-6, 1e-4, log=True),  # Less strict
-            "tau_A": 0.0,  # No L1 regularization
+            "tau_A": trial.suggest_float("tau_A", 1e-4, 1e-1, log=True),
             "seed": 42
         }
         print(f"Optimizing around defaults - Trial {trial_num}")
@@ -210,11 +210,24 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
 
     data_np_orig, variable_names, _ = load_data(dataset_config["data_path"])
 
-    # Prepare data_np in the shape expected by algorithms (especially DAG-GNN)
-    if data_np_orig.ndim == 2:
-        data_np_for_algo = np.expand_dims(data_np_orig, axis=2)
+    # --- START: Corrected Data Reshaping Block ---
+    data_np_for_algo = None
+    if algorithm_name.lower() == "dag-gnn":
+        # DAG-GNN expects a 3D array: (samples, nodes, features_per_node)
+        if data_np_orig.ndim == 2:
+            data_np_for_algo = np.expand_dims(data_np_orig, axis=2)
+        else:
+            data_np_for_algo = data_np_orig
     else:
-        data_np_for_algo = data_np_orig
+        # GES and PC expect a 2D array: (samples, nodes)
+        if data_np_orig.ndim == 3 and data_np_orig.shape[2] == 1:
+            data_np_for_algo = np.squeeze(data_np_orig, axis=2)
+        elif data_np_orig.ndim == 2:
+            data_np_for_algo = data_np_orig
+        else:
+            # Handle unexpected shapes if necessary
+            raise ValueError(f"Unsupported data shape {data_np_orig.shape} for {algorithm_name.upper()}")
+    # --- END: Corrected Data Reshaping Block ---
 
     n_nodes = data_np_for_algo.shape[1]
     data_feature_dim_or_num_classes = 0
@@ -251,6 +264,12 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
         best_model_path = current_algo_params.get("best_model_path")
         if algorithm_name.lower() == "dag-gnn" and best_model_path and os.path.exists(best_model_path):
             if verbose_eval: print(f"  Loading pre-tuned DAG-GNN model from: {best_model_path}")
+
+            if dataset_config["data_type"] == 'discrete':
+                data_feature_dim_or_num_classes = int(np.max(data_np_for_algo)) + 1
+            else:  # continuous
+                data_feature_dim_or_num_classes = data_np_for_algo.shape[2]
+
             algorithm_instance.load_trained_model(
                 best_model_path,
                 n_nodes,

@@ -247,11 +247,11 @@ class DAG_GNN_Algorithm(BaseAlgorithm):
             h_A = _h_A(origin_A, self.args.data_variable_size)
             h_A_loss = lambda_A * h_A + 0.5 * c_A * h_A * h_A
 
-            edge_penalty = -0.1 * torch.sum(torch.abs(origin_A))  # Negative to encourage edges
-            if torch.sum(torch.abs(origin_A)) < 1.0:  # If too few edges
-                edge_penalty *= 10  # Stronger penalty
+            # edge_penalty = -0.1 * torch.sum(torch.abs(origin_A))  # Negative to encourage edges
+            # if torch.sum(torch.abs(origin_A)) < 1.0:  # If too few edges
+            #     edge_penalty *= 10  # Stronger penalty
 
-            loss = loss_nll + loss_kl + h_A_loss + sparse_loss + edge_penalty
+            loss = loss_nll + loss_kl + h_A_loss + sparse_loss # + edge_penalty
 
             loss.backward()
             optimizer.step()
