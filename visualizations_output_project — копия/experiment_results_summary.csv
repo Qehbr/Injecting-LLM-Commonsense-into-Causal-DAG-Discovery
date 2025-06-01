@@ -1,0 +1,7 @@
+,execution_time_sec,shd_custom_cpdag_vs_dag,f1_skeleton,precision_skeleton,recall_skeleton,tp_skeleton,fp_skeleton,fn_skeleton,f1_strict_directed,precision_strict_directed,recall_strict_directed,tp_strict_directed,fp_strict_directed,fn_strict_directed
+asia_n2000_ges,0.4718,8,0.9333,1.0000,0.8750,7,0,1,0.0000,0.0000,0.0000,0,5,8
+asia_n2000_pc,0.0342,8,0.7692,1.0000,0.6250,5,0,3,0.0000,0.0000,0.0000,0,2,8
+asia_n2000_dag-gnn,1238.5428,10,0.5000,0.4167,0.6250,5,7,3,0.5000,0.4167,0.6250,5,7,3
+sachs_continuous_ges,0.8634,18,0.5714,0.7273,0.4706,8,3,9,0.1600,0.2500,0.1176,2,6,15
+sachs_continuous_pc,0.0227,19,0.6250,0.6667,0.5882,10,5,7,0.2222,0.3000,0.1765,3,7,14
+sachs_continuous_dag-gnn,581.4864,34,0.4314,0.3235,0.6471,11,23,6,0.2353,0.1765,0.3529,6,28,11

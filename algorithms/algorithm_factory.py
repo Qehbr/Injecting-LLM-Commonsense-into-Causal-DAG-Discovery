@@ -1,72 +1,60 @@
 # project/algorithms/algorithm_factory.py
 from .ges_algorithm import GESAlgorithm
-from .pc_algorithm import PCAlgorithm  # Import PCAlgorithm
+from .pc_algorithm import PCAlgorithm
 from .dag_gnn_algorithm import DAG_GNN_Algorithm
 
 
 class AlgorithmFactory:
-    """
-    Factory class to create and return instances of causal discovery algorithms.
-    """
-
     @staticmethod
     def create_algorithm(algorithm_name: str, data_type: str = "continuous",
-                         score_name_override: str = None,  # For score-based algos like GES
-                         parameters_override: dict = None):  # Generic dict for other params
-        """
-        Creates an instance of the specified causal discovery algorithm.
-
-        Args:
-            algorithm_name (str): The name of the algorithm (e.g., "ges", "pc").
-            data_type (str): The type of data ("continuous" or "discrete").
-            score_name_override (str, optional): Specific score function (for GES).
-            parameters_override (dict, optional): Specific parameters for the algorithm.
-                                                  For PC, this could include 'alpha', 'indep_test', 'stable'.
-                                                  For GES, this would be for its score function.
-
-        Returns:
-            An instance of a class derived from BaseAlgorithm.
-
-        Raises:
-            ValueError: If the algorithm_name is unknown.
-        """
+                         score_name_override: str = None,
+                         parameters_override: dict = None):
         algo_name_lower = algorithm_name.lower()
-
-        # Initialize common parameters from parameters_override if they exist
-        # These are general and might be used by multiple algorithms or set as defaults
         common_params = parameters_override if parameters_override is not None else {}
 
         if algo_name_lower == "ges":
-            # GES takes score_name_override and its own parameters in parameters_override
             return GESAlgorithm(data_type=data_type,
                                 score_name_override=score_name_override,
-                                parameters_override=common_params.get("ges_params", common_params))  # Allow nesting
+                                parameters_override=common_params.get("ges_params", common_params))
 
         elif algo_name_lower == "pc":
-            # PC specific parameters can be passed directly or via the parameters_override dict
-            alpha = common_params.get('alpha', 0.05)  # Default alpha if not provided
-            indep_test = common_params.get('indep_test', None)  # None will let PCAlgorithm pick based on data_type
+            alpha = common_params.get('alpha', 0.05)
+            indep_test = common_params.get('indep_test', None)
             stable = common_params.get('stable', True)
-            # Pass the whole common_params too, as PCAlgorithm might pick other relevant keys
             return PCAlgorithm(data_type=data_type,
                                alpha=alpha,
                                indep_test_override=indep_test,
                                stable=stable,
-                               parameters_override=common_params)  # Pass the full dict for other PC params
+                               parameters_override=common_params)
 
-        elif algo_name_lower == "dag-gnn":
-            # DAG-GNN takes a general parameter dictionary
-            dagnn_params = common_params.get("dag-gnn", common_params)
+        elif algo_name_lower.startswith("dag-gnn"):  # Catches "dag-gnn", "dag-gnn-gemini", "dag-gnn-claude"
+            # Extract DAG-GNN specific params, which might be nested under the full algo name
+            # e.g., parameters_override might be {"dag-gnn-gemini": {"lr": 0.01, "llm_prior_edges_path": "..."}}
+            # or just {"lr": 0.01, "llm_prior_edges_path": "..."} if not nested.
+
+            # Try to get params specific to the full algo_name_lower first
+            dagnn_specific_params_block = common_params.get(algo_name_lower, {})
+            # If not found, try to get params for plain "dag-gnn"
+            if not dagnn_specific_params_block and "dag-gnn" in common_params:
+                dagnn_specific_params_block = common_params.get("dag-gnn", {})
+            # If still nothing, use common_params directly (assuming they are flat)
+            if not dagnn_specific_params_block:
+                dagnn_specific_params_block = common_params
+
+            # Ensure we make a copy to modify for pop
+            dagnn_params_for_init = dagnn_specific_params_block.copy()
+
+            llm_prior_path = dagnn_params_for_init.pop("llm_prior_edges_path", None)
+            # Pop other params that are not for DAG_GNN_Algorithm's direct parameters_override if any
+
             return DAG_GNN_Algorithm(data_type=data_type,
-                                     parameters_override=dagnn_params)
-
-        # Add more algorithms here as elif blocks
+                                     parameters_override=dagnn_params_for_init,  # Pass potentially modified params
+                                     llm_prior_edges_path=llm_prior_path)
         else:
-            raise ValueError(f"Unknown algorithm name: '{algorithm_name}'. "
-                             "Available algorithms: ['ges', 'pc', ...]")
+            raise ValueError(f"Unknown algorithm name: '{algorithm_name}'.")
 
 
-# For simpler usage, you can also provide a function if you prefer over a static method
+# ... (get_algorithm function remains same) ...
 def get_algorithm(algorithm_name: str, data_type: str = "continuous",
                   score_name_override: str = None, parameters_override: dict = None):
     return AlgorithmFactory.create_algorithm(algorithm_name, data_type,
