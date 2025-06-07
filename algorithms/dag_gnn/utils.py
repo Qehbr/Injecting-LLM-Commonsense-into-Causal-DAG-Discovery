@@ -1,35 +1,59 @@
-# project/algorithms/dag_gnn/utils.py
 import torch
 import torch.nn.functional as F
 import numpy as np
 import math
 
 
-# --- Main Utility Functions ---
-
 def nll_categorical(preds, target):
     """
-    Computes the negative log-likelihood for categorical data using cross-entropy.
-    preds: Logits from the model [batch, nodes, num_classes].
-    target: Ground truth class indices [batch, nodes].
+    Computes the negative log-likelihood loss for categorical predictions.
+
+    This is equivalent to the cross-entropy loss.
+
+    Parameters
+    ----------
+    preds : torch.Tensor
+        The predicted logits from the model, with shape
+        `(batch_size, num_nodes, num_classes)`.
+    target : torch.Tensor
+        The ground truth class indices, with shape `(batch_size, num_nodes)`
+        or `(batch_size, num_nodes, 1)`.
+
+    Returns
+    -------
+    torch.Tensor
+        A scalar tensor representing the mean cross-entropy loss.
     """
     if target.dim() == 3 and target.size(2) == 1:
         target = target.squeeze(-1)
-
-    # CrossEntropyLoss expects target of type Long
     target = target.long()
-
-    # Reshape for cross_entropy: preds -> [batch*nodes, num_classes], target -> [batch*nodes]
-    num_nodes = preds.size(1)
     preds_flat = preds.view(-1, preds.size(-1))
     target_flat = target.view(-1)
-
     loss = F.cross_entropy(preds_flat, target_flat, reduction='mean')
     return loss
 
 
 def nll_gaussian(preds, target, variance, add_const=False):
-    """Computes the negative log-likelihood for continuous (Gaussian) data."""
+    """
+    Computes the negative log-likelihood for a Gaussian distribution.
+
+    Parameters
+    ----------
+    preds : torch.Tensor
+        The predicted means of the distribution.
+    target : torch.Tensor
+        The ground truth values.
+    variance : float or torch.Tensor
+        The logarithm of the variance (log-variance).
+    add_const : bool, optional
+        If True, adds the constant term to the NLL computation.
+        Default is False.
+
+    Returns
+    -------
+    torch.Tensor
+        A scalar tensor representing the mean negative log-likelihood.
+    """
     neg_log_p = variance + torch.div(torch.pow(preds - target, 2), 2. * np.exp(2. * variance))
     if add_const:
         const = 0.5 * torch.log(2 * torch.from_numpy(np.pi) * variance)
@@ -38,69 +62,114 @@ def nll_gaussian(preds, target, variance, add_const=False):
 
 
 def kl_gaussian_sem(preds):
-    """Computes the KL divergence for the SEM."""
+    """
+    Computes the KL divergence of a Gaussian with a standard normal prior.
+
+    This is used in the context of a Structural Equation Model (SEM), assuming
+    the prior is N(0, I) and the posterior is N(mu, I). The KL divergence
+    simplifies to 0.5 * ||mu||^2.
+
+    Parameters
+    ----------
+    preds : torch.Tensor
+        The means (mu) of the Gaussian distributions, shape `(batch_size, ...)`.
+
+    Returns
+    -------
+    torch.Tensor
+        A scalar tensor representing the mean KL divergence per batch item.
+    """
     mu = preds
     kl_div = mu * mu
     return 0.5 * kl_div.sum() / preds.size(0)
 
 
 def stau(w, tau):
-    """Soft-thresholding operator."""
+    """
+    Soft-thresholding operator.
+
+    Also known as the shrinkage operator. It is defined as:
+    sign(w) * max(|w| - tau, 0).
+
+    Parameters
+    ----------
+    w : torch.Tensor
+        The input tensor.
+    tau : float
+        The threshold value.
+
+    Returns
+    -------
+    torch.Tensor
+        The tensor after applying the soft-thresholding operation.
+    """
     w1 = F.relu(torch.abs(w) - tau)
     return torch.sign(w) * w1
 
 
-def update_optimizer(optimizer, original_lr, c_A):
-    """Dynamically updates learning rate based on the constraint coefficient c_A."""
-    MAX_LR, MIN_LR = 1e-2, 1e-4
-
-    # Avoid log(0) or log(negative)
-    if c_A <= 1:
-        estimated_lr = original_lr
-    else:
-        estimated_lr = original_lr / math.log10(c_A)
-
-    lr = np.clip(estimated_lr, MIN_LR, MAX_LR)
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    return optimizer, lr
-
-
-# --- Acyclicity Constraint Functions ---
-
 def _h_A(A, m):
-    """Computes the acyclicity constraint function h(A)."""
+    """
+    Computes the acyclicity constraint function for an adjacency matrix.
+
+    This function calculates `h(A) = tr(e^(A*A)) - m`, where `A*A` represents
+    element-wise multiplication. A value of 0 for `h(A)` implies that the
+    graph represented by A is a Directed Acyclic Graph (DAG).
+
+    Parameters
+    ----------
+    A : torch.Tensor
+        The adjacency matrix of the graph.
+    m : int
+        The number of nodes in the graph (i.e., the dimension of A).
+
+    Returns
+    -------
+    torch.Tensor
+        A scalar tensor representing the value of the constraint function.
+    """
     expm_A = matrix_poly(A * A, m)
     h_A = torch.trace(expm_A) - m
     return h_A
 
 
 def matrix_poly(matrix, d):
-    """Computes the matrix polynomial for the acyclicity constraint."""
-    # Ensure eye is on the same device as the matrix
+    """
+    Computes a polynomial approximation of the matrix exponential.
+
+    The approximation is `(I + matrix/d)^d`.
+
+    Parameters
+    ----------
+    matrix : torch.Tensor
+        The input square matrix.
+    d : int
+        The degree of the polynomial approximation.
+
+    Returns
+    -------
+    torch.Tensor
+        The resulting matrix from the polynomial approximation.
+    """
     x = torch.eye(d, device=matrix.device, dtype=matrix.dtype) + torch.div(matrix, d)
     return torch.matrix_power(x, d)
 
 
-def preprocess_adj_new(adj):
-    """Computes I - A^T."""
-    # Ensure eye is on the same device as adj
-    identity = torch.eye(adj.shape[0], device=adj.device, dtype=adj.dtype)
-    return identity - adj.transpose(0, 1)
-
-
 def preprocess_adj_new1(adj):
-    """Computes (I - A^T)^-1."""
-    # Ensure eye is on the same device as adj
+    """
+    Pre-processes an adjacency matrix for use in a structural equation model.
+
+    This computes the inverse of `(I - A^T)`, which is a key component in
+    recovering the variables from their noise terms in a linear SEM.
+
+    Parameters
+    ----------
+    adj : torch.Tensor
+        The adjacency matrix `A`.
+
+    Returns
+    -------
+    torch.Tensor
+        The pre-processed matrix `(I - A^T)^-1`.
+    """
     identity = torch.eye(adj.shape[0], device=adj.device, dtype=adj.dtype)
     return torch.inverse(identity - adj.transpose(0, 1))
-
-
-# --- Other Utilities ---
-
-def my_softmax(tensor, axis=1):
-    """Applies softmax along a specified axis."""
-    exp = torch.exp(tensor)
-    sum_exp = torch.sum(exp, axis=axis, keepdim=True)
-    return exp / (sum_exp + 1e-10)

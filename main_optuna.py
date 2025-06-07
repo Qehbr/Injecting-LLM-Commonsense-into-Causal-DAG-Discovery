@@ -1,30 +1,17 @@
-# project/main_optuna.py
 import os
 import numpy as np
 import pandas as pd
 import optuna
 import time
 import torch
-# import os # Already imported
-import warnings
 
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # For PyTorch debugging if needed
-
-from utils.data_processing import (
-    load_data, load_ground_truth_edges,
-    convert_edges_to_adj_matrix, get_dataset_name
-)
+from utils.data_processing import load_data, load_ground_truth_edges, convert_edges_to_adj_matrix, get_dataset_name
 from utils.evaluation import evaluate_dag_metrics
-from visualization.graph_visualization import (
-    ensure_visualization_folder
-)
+from visualization.graph_visualization import ensure_visualization_folder
 from algorithms.algorithm_factory import get_algorithm
 
-# --- Standard Parameters for DAG-GNN (Base for Optuna & variants) ---
 DAG_GNN_BASE_PARAMS = {
-    "epochs": 300, "lr": 1e-3,  # Optuna will likely override these in its suggestions
+    "epochs": 300, "lr": 1e-3,
     "lambda_A": 0.0,
     "c_A": 1.0,
     "k_max_iter": 100,
@@ -33,15 +20,13 @@ DAG_GNN_BASE_PARAMS = {
     "tau_A": 0.0,
     "encoder_hidden": 64,
     "decoder_hidden": 64,
-    "z_dims": 3,  # This should ideally be dataset-specific or tuned
+    "z_dims": 3,
     "seed": 42,
-    "variance": 0.1,  # Default variance for NLL
-    # "llm_prior_init_value" will be added by Optuna for relevant variants
-    # or taken from here as a default if not tuned.
-    "llm_prior_init_value": 0.3  # Default strength if not tuned by Optuna
+    "variance": 0.0,  #
+    "llm_prior_init_value": 0.3,
+    "log_interval": 50
 }
 
-# --- Configuration for Datasets ---
 DATASETS_CONFIG = [
     {
         "name_id": "asia_n2000",
@@ -49,11 +34,32 @@ DATASETS_CONFIG = [
         "gt_path": "datasets/asia_ground_truth_edges.txt",
         "data_type": "discrete",
         "n_samples_for_batch": 2000,
-        "n_nodes_approx": 8,  # Approximate number of nodes for z_dims default
+        "n_nodes_approx": 8,
         "algo_params_override": {
             "ges": {"bdeu_sample_prior": 10.0},
             "pc": {"alpha": 0.05, "indep_test": "gsq"},
-            "dag-gnn": {**DAG_GNN_BASE_PARAMS, 'z_dims': 4},  # Override z_dims for asia
+            "dag-gnn": {**DAG_GNN_BASE_PARAMS, 'z_dims': 4},
+            "dag-gnn-gemini": {
+                **DAG_GNN_BASE_PARAMS, 'z_dims': 4,
+                "llm_prior_edges_path": "datasets/gemini/asia_N2000_causal_edges.csv"
+            },
+            "dag-gnn-claude": {
+                **DAG_GNN_BASE_PARAMS, 'z_dims': 4,
+                "llm_prior_edges_path": "datasets/claude/asia_N2000_causal_edges.csv"
+            }
+        }
+    },
+    {
+        "name_id": "asia_n5000",
+        "data_path": "datasets/asia_N5000.csv",
+        "gt_path": "datasets/asia_ground_truth_edges.txt",
+        "data_type": "discrete",
+        "n_samples_for_batch": 5000,
+        "n_nodes_approx": 8,
+        "algo_params_override": {
+            "ges": {"bdeu_sample_prior": 10.0},
+            "pc": {"alpha": 0.05, "indep_test": "gsq"},
+            "dag-gnn": {**DAG_GNN_BASE_PARAMS, 'z_dims': 4},
             "dag-gnn-gemini": {
                 **DAG_GNN_BASE_PARAMS, 'z_dims': 4,
                 "llm_prior_edges_path": "datasets/gemini/asia_N2000_causal_edges.csv"
@@ -68,14 +74,13 @@ DATASETS_CONFIG = [
         "name_id": "sachs_continuous",
         "data_path": "datasets/sachs_observational_continuous.csv",
         "gt_path": "datasets/sachs_ground_truth_edges_17.txt",
-        # Ensure this GT file matches the 11-node data if that's what sachs_observational_continuous.csv is
         "data_type": "continuous",
         "n_samples_for_batch": 853,
-        "n_nodes_approx": 11,  # For sachs
+        "n_nodes_approx": 11,
         "algo_params_override": {
             "ges": {"penalty_discount": 2.0},
             "pc": {"alpha": 0.05},
-            "dag-gnn": {**DAG_GNN_BASE_PARAMS, "tau_A": 0.01, 'z_dims': 5},  # Override z_dims for sachs
+            "dag-gnn": {**DAG_GNN_BASE_PARAMS, "tau_A": 0.01, 'z_dims': 5},
             "dag-gnn-gemini": {
                 **DAG_GNN_BASE_PARAMS, "tau_A": 0.01, 'z_dims': 5,
                 "llm_prior_edges_path": "datasets/gemini/sachs_observational_continuous_causal_edges.csv"
@@ -87,156 +92,183 @@ DATASETS_CONFIG = [
         }
     }
 ]
-MAIN_VIZ_OUTPUT_FOLDER = "visualizations_output_project"  # For final runs after tuning
-OPTUNA_OUTPUT_BASE_FOLDER = "optuna_study_results"  # For Optuna trial artifacts
+MAIN_VIZ_OUTPUT_FOLDER = "visualizations_output_project"
+OPTUNA_OUTPUT_BASE_FOLDER = "optuna_study_results"
 
 
 def dagnn_objective(trial, dataset_config_entry, algorithm_name_being_tuned, base_optuna_artifacts_folder):
+    """
+    Defines the objective function for Optuna hyperparameter tuning of DAG-GNN.
+
+    This function is called by Optuna for each trial. It suggests a set of
+    hyperparameters, runs the specified DAG-GNN variant on a dataset,
+    evaluates the learned graph against the ground truth, and returns the
+    F1 score for directed edges, which Optuna aims to maximize. It also logs
+    all other metrics and the path to the saved model as user attributes to
+    the trial for later analysis.
+
+    Parameters
+    ----------
+    trial : optuna.Trial
+        An Optuna Trial object used to suggest hyperparameters and report results.
+    dataset_config_entry : dict
+        A dictionary containing the configuration for the dataset being used,
+        including paths and data types.
+    algorithm_name_being_tuned : str
+        The specific DAG-GNN variant being tuned (e.g., 'dag-gnn',
+        'dag-gnn-gemini').
+    base_optuna_artifacts_folder : str
+        The root directory where artifacts for the trial (like saved models)
+        should be stored.
+
+    Returns
+    -------
+    float
+        The F1 score for strictly directed edges, which serves as the
+        objective value for Optuna to maximize.
+    """
     dataset_id_str = dataset_config_entry['name_id']
     trial_num = trial.number
-    num_nodes_approx = dataset_config_entry.get('n_nodes_approx', 10)  # Get n_nodes for dynamic z_dims
-
-    print(f"\n--- Optuna Trial #{trial_num} for {algorithm_name_being_tuned.upper()} on {dataset_id_str} ---")
+    num_nodes_approx = dataset_config_entry.get('n_nodes_approx', 10)
 
     # Define hyperparameters to be tuned by Optuna
     suggested_params = {
-        "epochs": trial.suggest_int("epochs", 100, 400, step=50),  # Adjusted range
-        "lr": trial.suggest_float("lr", 5e-4, 1e-2, log=True),  # Adjusted range
+        "epochs": trial.suggest_int("epochs", 100, 400, step=50),
+        "lr": trial.suggest_float("lr", 5e-4, 1e-2, log=True),
         "batch_size": trial.suggest_categorical("batch_size", [64, 100, 128, min(256, dataset_config_entry.get(
             'n_samples_for_batch', 256))]),
-        # lambda_A is often 0 when using the augmented Lagrangian approach with c_A and h_A
-        "lambda_A": 0.0,  # Kept fixed as per common DAG-GNN setup
-        "c_A": trial.suggest_float("c_A", 0.01, 20.0, log=True),  # Wider range for c_A
-        "k_max_iter": trial.suggest_int("k_max_iter", 20, 100, step=10),  # Adjusted range
-        "graph_threshold": trial.suggest_float("graph_threshold", 0.1, 0.4, step=0.05),
+        "lambda_A": 0.0,
+        "c_A": trial.suggest_float("c_A", 0.01, 20.0, log=True),
+        "k_max_iter": trial.suggest_int("k_max_iter", 20, 100, step=10),
+        "graph_threshold": trial.suggest_float("graph_threshold", 0.01, 0.4, step=0.01),
         "encoder_hidden": trial.suggest_categorical("encoder_hidden", [32, 64, 128]),
         "decoder_hidden": trial.suggest_categorical("decoder_hidden", [32, 64, 128]),
-        "z_dims": trial.suggest_int("z_dims", max(1, num_nodes_approx // 3), num_nodes_approx),  # Dynamic z_dims
+        "z_dims": trial.suggest_int("z_dims", max(1, num_nodes_approx // 3), num_nodes_approx),
         "h_tol": trial.suggest_float("h_tol", 1e-9, 1e-5, log=True),
-        "tau_A": trial.suggest_float("tau_A", 0.0, 0.05, step=0.005),  # Allow 0, up to a bit more L1
-        "variance": trial.suggest_float("variance", 0.05, 0.5, log=True),
-        "seed": 42  # Keep seed fixed for reproducibility of a single trial's result
+        "tau_A": trial.suggest_float("tau_A", 0.0, 0.01, step=0.001),
+        "seed": 42  # Keep seed fixed for reproducibility
     }
+    # If data is continuous and variance tuning is desired:
+    if dataset_config_entry["data_type"] == 'continuous':
+        suggested_params["variance"] = trial.suggest_float("variance", 0.0, 0.2, step=0.05, log=False)
+    else:  #
+        suggested_params["variance"] = DAG_GNN_BASE_PARAMS.get('variance', 0.0)
 
-    # Conditionally add llm_prior_init_value to tuning if it's an LLM variant
     if "gemini" in algorithm_name_being_tuned or "claude" in algorithm_name_being_tuned:
         suggested_params["llm_prior_init_value"] = trial.suggest_float("llm_prior_init_value", 0.05, 0.7, step=0.05)
 
-    print(f"Optuna Suggested params for trial {trial_num}: {suggested_params}")
-
-    # --- Prepare config for this specific trial run ---
-    # Start with the base config for this algorithm variant from DATASETS_CONFIG
-    # This ensures static parts like llm_prior_edges_path are included
-    trial_algo_params = dataset_config_entry["algo_params_override"].get(algorithm_name_being_tuned, {}).copy()
-
-    # Update with Optuna's suggested parameters for this trial
+    # Start with a full set of base parameters for the specific variant
+    trial_algo_params = DAG_GNN_BASE_PARAMS.copy()
+    if algorithm_name_being_tuned in dataset_config_entry["algo_params_override"]:
+        trial_algo_params.update(dataset_config_entry["algo_params_override"][algorithm_name_being_tuned])
     trial_algo_params.update(suggested_params)
 
-    # --- Execute the algorithm with these parameters ---
     trial_artifacts_folder = os.path.join(base_optuna_artifacts_folder, dataset_id_str, algorithm_name_being_tuned,
                                           f"trial_{trial_num}")
-    ensure_visualization_folder(trial_artifacts_folder)  # For saving models if needed
+    ensure_visualization_folder(trial_artifacts_folder)
 
-    try:
-        data_np, variable_names, _ = load_data(dataset_config_entry["data_path"])
-        true_edges_list = load_ground_truth_edges(dataset_config_entry["gt_path"])
-        true_adj_matrix_dag = convert_edges_to_adj_matrix(true_edges_list, variable_names)
-    except Exception as e:
-        print(f"  Error loading data/GT for trial #{trial_num} on {dataset_id_str}: {e}. Pruning.")
-        raise optuna.exceptions.TrialPruned()
+    data_np, variable_names, _ = load_data(dataset_config_entry["data_path"])
+    true_edges_list = load_ground_truth_edges(dataset_config_entry["gt_path"])
+    true_adj_matrix_dag = convert_edges_to_adj_matrix(true_edges_list, variable_names)
 
     if true_adj_matrix_dag is None:
-        print(f"  Ground truth not available for trial #{trial_num} on {dataset_id_str}. Pruning.")
         raise optuna.exceptions.TrialPruned()
 
-    # Prepare data shape for DAG-GNN (expects 3D)
     if data_np.ndim == 2:
         data_np_for_algo = np.expand_dims(data_np, axis=2)
     elif data_np.ndim == 3 and data_np.shape[2] != 1 and dataset_config_entry["data_type"] == "discrete":
-        # This case needs careful handling for discrete multivariate, but DAG-GNN module assumes univariate discrete
-        print(
-            f"Warning: Discrete data has multiple features per node ({data_np.shape[2]}). DAG-GNN's discrete mode expects 1.")
-        data_np_for_algo = data_np[..., [0]]  # Take only the first feature for discrete
+        data_np_for_algo = data_np[..., [0]]
     else:
         data_np_for_algo = data_np
 
-    learn_results = None
-    learned_strict_dag_adj = None
-    learned_cpdag_adj_raw = None
-    learn_time = -1.0
+    algorithm_instance = get_algorithm(
+        algorithm_name=algorithm_name_being_tuned,
+        data_type=dataset_config_entry["data_type"],
+        parameters_override=trial_algo_params
+    )
 
-    try:
-        algorithm_instance = get_algorithm(
-            algorithm_name=algorithm_name_being_tuned,  # Use the specific variant name
-            data_type=dataset_config_entry["data_type"],
-            parameters_override=trial_algo_params  # Pass the combined (base + Optuna) params
-        )
+    start_learn_time = time.time()
+    learn_results = algorithm_instance.learn_structure(data_np_for_algo, variable_names=variable_names)
+    learn_time = time.time() - start_learn_time
 
-        print(f"  Starting {algorithm_name_being_tuned.upper()} learn_structure for trial {trial_num}...")
-        start_learn_time = time.time()
-        learn_results = algorithm_instance.learn_structure(data_np_for_algo, variable_names=variable_names)
-        learn_time = time.time() - start_learn_time
-        print(f"  Finished learn_structure for trial {trial_num} in {learn_time:.2f}s.")
+    learned_cpdag_adj_raw = algorithm_instance.get_learned_cpdag_adj_matrix()
+    learned_strict_dag_adj = algorithm_instance.get_learned_strict_dag_adj_matrix()
 
-        learned_cpdag_adj_raw = algorithm_instance.get_learned_cpdag_adj_matrix()
-        learned_strict_dag_adj = algorithm_instance.get_learned_strict_dag_adj_matrix()
-
-    except Exception as e:
-        print(
-            f"  Trial {trial_num} for {algorithm_name_being_tuned.upper()} on {dataset_id_str} failed during algorithm execution: {e}")
-        import traceback
-        traceback.print_exc()
-        # For Optuna, it's better to return a very bad score than prune if some result can be salvaged
-        # However, if execution fails completely, pruning or returning a penalty value is common.
-        # Let's return a clear failure metric (e.g., negative F1 or high SHD).
-        # For maximization (F1), return 0.0 or a very small number.
-        return 0.0  # Or raise optuna.exceptions.TrialPruned()
+    if learned_strict_dag_adj is not None:
+        num_learned_edges = np.sum(learned_strict_dag_adj)
+        print(f"  Trial {trial_num}: Learned strict DAG has {num_learned_edges} edges.")
+        if num_learned_edges == 0:
+            print(f"  WARNING: Trial {trial_num} produced an empty graph.")
 
     if learned_strict_dag_adj is not None and learned_cpdag_adj_raw is not None:
         eval_metrics = evaluate_dag_metrics(
-            learned_strict_dag_adj, learned_cpdag_adj_raw, true_adj_matrix_dag, verbose=False
-            # Keep Optuna logs concise
+            learned_strict_dag_adj, learned_cpdag_adj_raw, true_adj_matrix_dag
         )
-        # Choose your primary metric for Optuna to optimize
-        # Example: F1 score for strictly directed edges
         metric_to_optimize = eval_metrics.get("f1_strict_directed", 0.0)
 
-        shd = eval_metrics.get("shd_custom_cpdag_vs_dag", float('inf'))
-        f1_skeleton = eval_metrics.get("f1_skeleton", 0.0)
+        for metric_name, metric_value in eval_metrics.items():
+            if isinstance(metric_value, np.integer):
+                trial.set_user_attr(metric_name, int(metric_value))
+            elif isinstance(metric_value, np.floating):
+                trial.set_user_attr(metric_name, float(metric_value))
+            elif isinstance(metric_value, np.bool_):
+                trial.set_user_attr(metric_name, bool(metric_value))
+            else:
+                trial.set_user_attr(metric_name, metric_value)
 
-        print(
-            f"  Trial {trial_num} ({algorithm_name_being_tuned}) on {dataset_id_str} - F1 Strict: {metric_to_optimize:.4f}, SHD: {shd}, F1 Skel: {f1_skeleton:.4f}, Time: {learn_time:.2f}s")
+        trial.set_user_attr("execution_time_sec", float(learn_time))
 
-        # Store other relevant metrics or artifacts if needed
-        trial.set_user_attr("shd_custom_cpdag_vs_dag", shd)
-        trial.set_user_attr("f1_skeleton", f1_skeleton)
-        trial.set_user_attr("execution_time_sec", learn_time)
+        print(f"  Metrics for Trial {trial_num}:")
+        for key, value in trial.user_attrs.items():
+            if isinstance(value, float):
+                print(f"    {key}: {value:.4f}")
+            else:
+                print(f"    {key}: {value}")
+        print(f"  Optimizing Metric (f1_strict_directed) for Trial {trial_num}: {metric_to_optimize:.4f}")
 
-        if learn_results and "encoder_state" in learn_results and hasattr(learn_results["encoder_state"],
-                                                                          'keys'):  # Check if it's a state dict
+        if learn_results and "encoder_state" in learn_results and hasattr(learn_results["encoder_state"], 'keys'):
             model_save_path = os.path.join(trial_artifacts_folder, f"trial_{trial_num}_model_state.pt")
-            try:
-                torch.save(learn_results["encoder_state"], model_save_path)
-                trial.set_user_attr("model_path", model_save_path)
-                print(f"  Saved model state for trial {trial_num} to {model_save_path}")
-            except Exception as e_save:
-                print(f"  Warning: Could not save model state for trial {trial_num}: {e_save}")
-
-        return metric_to_optimize  # Optuna will try to maximize this
+            torch.save(learn_results["encoder_state"], model_save_path)
+            trial.set_user_attr("model_path", model_save_path)
+        return metric_to_optimize
     else:
-        print(
-            f"  Trial {trial_num} ({algorithm_name_being_tuned}) on {dataset_id_str} - Learned graph is None. Returning low optimization metric (0.0).")
+        print(f"  Trial {trial_num}: Evaluation skipped (learned graph or GT missing). Returning 0.0 for F1 score.")
+        trial.set_user_attr("execution_time_sec", float(learn_time))
+        trial.set_user_attr("f1_strict_directed", 0.0)
         return 0.0
 
 
-# --- run_single_experiment (remains mostly the same, ensure verbose_eval=False for Optuna calls if modifying it)
-# For brevity, its definition is omitted here but it's assumed to be the version from the previous response
-# that supports loading models via "best_model_path" and "best_model_exec_time"
 def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True, verbose_eval=True):
-    # (Ensure this function is the one from the previous response that handles model loading)
-    # ... it will check for "best_model_path" in dataset_config["algo_params_override"][algorithm_name.lower()]
-    # ... and call algorithm_instance.load_trained_model(...) if present for dag-gnn.
-    # (Copied from previous for completeness, ensure it's aligned)
+    """
+    Executes a single, complete causal discovery experiment.
+
+    This function orchestrates the process for a given algorithm and dataset.
+    It handles loading data, preparing data formats, running the discovery
+    algorithm, evaluating the resulting graph against ground truth, and
+    generating visualizations. For DAG-GNN variants, it can load a pre-tuned
+    model if a path is provided in the configuration.
+
+    Parameters
+    ----------
+    dataset_config : dict
+        A dictionary containing the configuration for the dataset, including
+        paths, data type, and algorithm-specific parameters.
+    algorithm_name : str, optional
+        The name of the causal discovery algorithm to run (e.g., 'ges', 'pc',
+        'dag-gnn'). Default is 'ges'.
+    viz_enabled : bool, optional
+        If True, generates and saves visualizations of the graphs.
+        Default is True.
+    verbose_eval : bool, optional
+        If True, prints detailed progress and evaluation metrics to the console.
+        Default is True.
+
+    Returns
+    -------
+    dict or None
+        A dictionary containing the evaluation metrics for the run. Returns
+        None if a fatal error occurs during execution.
+    """
     dataset_id_str = dataset_config['name_id']
     if verbose_eval: print(f"\n--- Processing Dataset: {dataset_id_str} with Algorithm: {algorithm_name.upper()} ---")
 
@@ -249,46 +281,37 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
 
     data_np_orig, variable_names, _ = load_data(dataset_config["data_path"])
 
-    # --- START: Corrected Data Reshaping Block ---
-    data_np_for_algo = None
-    if algorithm_name.lower() == "dag-gnn":
-        # DAG-GNN expects a 3D array: (samples, nodes, features_per_node)
+    if algorithm_name.lower().startswith("dag-gnn"):
         if data_np_orig.ndim == 2:
             data_np_for_algo = np.expand_dims(data_np_orig, axis=2)
         else:
             data_np_for_algo = data_np_orig
-    else:
-        # GES and PC expect a 2D array: (samples, nodes)
+    else:  # For GES, PC
         if data_np_orig.ndim == 3 and data_np_orig.shape[2] == 1:
             data_np_for_algo = np.squeeze(data_np_orig, axis=2)
         elif data_np_orig.ndim == 2:
             data_np_for_algo = data_np_orig
         else:
-            # Handle unexpected shapes if necessary
             raise ValueError(f"Unsupported data shape {data_np_orig.shape} for {algorithm_name.upper()}")
-    # --- END: Corrected Data Reshaping Block ---
 
     n_nodes = data_np_for_algo.shape[1]
-
     if verbose_eval: print(f"  Data loaded: {data_np_orig.shape[0]} samples, {n_nodes} variables.")
 
     true_adj_matrix_dag = None
     try:
         true_edges_list = load_ground_truth_edges(dataset_config["gt_path"])
         true_adj_matrix_dag = convert_edges_to_adj_matrix(true_edges_list, variable_names)
-        if verbose_eval: print(f"  Ground truth DAG loaded: {int(np.sum(true_adj_matrix_dag))} edges.")
+        if verbose_eval and true_adj_matrix_dag is not None: print(
+            f"  Ground truth DAG loaded: {int(np.sum(true_adj_matrix_dag))} edges.")
     except Exception as e:
         if verbose_eval: print(f"  Warning/Error loading GT for {dataset_id_str}: {e}")
 
-    learned_cpdag_adj_raw = None
-    learned_strict_dag_adj = None
-    execution_time = -1.0
-
     try:
-        # Correctly get parameters for the specific algorithm
         algo_params_config_root = dataset_config.get("algo_params_override", {})
         current_algo_params = algo_params_config_root.get(algorithm_name.lower(), {})
 
+        if verbose_eval and algorithm_name.lower().startswith("dag-gnn"):
+            print(f"  RunSingleExp: DAG-GNN params before potential model load: {current_algo_params}")
         algorithm_instance = get_algorithm(
             algorithm_name=algorithm_name,
             data_type=dataset_config["data_type"],
@@ -296,15 +319,13 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
         )
 
         best_model_path = current_algo_params.get("best_model_path")
-        if algorithm_name.lower() == "dag-gnn":
-            # Calculate this ONLY for DAG-GNN
+        if algorithm_name.lower().startswith("dag-gnn"):
             if dataset_config["data_type"] == 'discrete':
-                # Ensure data_np_for_algo is appropriate for np.max (it will be 3D [N, nodes, 1] for discrete DAG-GNN)
                 temp_data_for_max = data_np_for_algo
                 if temp_data_for_max.ndim == 3 and temp_data_for_max.shape[2] == 1:
-                    temp_data_for_max = np.squeeze(data_np_for_algo, axis=2)  # Use squeezed version for np.max
+                    temp_data_for_max = np.squeeze(data_np_for_algo, axis=2)
                 data_feature_dim_or_num_classes = int(np.max(temp_data_for_max)) + 1
-            else:  # continuous for DAG-GNN (data_np_for_algo is 3D: [N, nodes, features_per_node])
+            else:  # continuous
                 data_feature_dim_or_num_classes = data_np_for_algo.shape[2]
 
             if best_model_path and os.path.exists(best_model_path):
@@ -312,15 +333,13 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
                 algorithm_instance.load_trained_model(
                     best_model_path,
                     n_nodes,
-                    data_feature_dim_or_num_classes,  # Correctly used here
+                    data_feature_dim_or_num_classes,
                     current_algo_params
                 )
-                execution_time = current_algo_params.get("best_model_exec_time", 0)
+                execution_time = current_algo_params.get("best_model_exec_time", 0)  # Use stored execution time
             else:
-                # If training DAG-GNN from scratch, it will use data_feature_dim_or_num_classes internally
-                # The _setup_hyperparameters method in DAG_GNN_Algorithm should handle this
                 if verbose_eval: print(f"  Running {algorithm_name.upper()} with params: {current_algo_params}")
-                algorithm_instance.learn_structure(data_np_for_algo, variable_names=variable_names)
+                learn_results = algorithm_instance.learn_structure(data_np_for_algo, variable_names=variable_names)
                 execution_time = algorithm_instance.get_execution_time()
         else:  # For GES, PC
             if verbose_eval: print(f"  Running {algorithm_name.upper()} with params: {current_algo_params}")
@@ -331,7 +350,7 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
         learned_strict_dag_adj = algorithm_instance.get_learned_strict_dag_adj_matrix()
 
     except Exception as e:
-        print(f"  Error running {algorithm_name.upper()} on {dataset_id_str}: {e}")
+        print(f"  FATAL ERROR running {algorithm_name.upper()} on {dataset_id_str}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -340,9 +359,15 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
     if true_adj_matrix_dag is not None and learned_strict_dag_adj is not None and learned_cpdag_adj_raw is not None:
         if verbose_eval: print("\n  Evaluating Learned Graph against Ground Truth...")
         eval_metrics = evaluate_dag_metrics(
-            learned_strict_dag_adj, learned_cpdag_adj_raw, true_adj_matrix_dag, verbose=verbose_eval
+            learned_strict_dag_adj, learned_cpdag_adj_raw, true_adj_matrix_dag
         )
         metrics.update(eval_metrics)
+        if verbose_eval:
+            for k, v_metric in eval_metrics.items():
+                if isinstance(v_metric, float):
+                    print(f"    {k}: {v_metric:.4f}")
+                else:
+                    print(f"    {k}: {v_metric}")
 
     if viz_enabled and current_run_viz_folder:
         from visualization.graph_visualization import visualize_true_graph, visualize_learned_graph_nx, \
@@ -373,19 +398,13 @@ def run_single_experiment(dataset_config, algorithm_name="ges", viz_enabled=True
     return metrics
 
 
-# --- Main Execution Block ---
-# --- Main Execution Block ---
 if __name__ == "__main__":
     PERFORM_OPTUNA_TUNING = True
-    # Define which DAG-GNN variants to tune
-    # Ensure your LLM_commonsense.py script has run and created the prior files for these.
     DAG_GNN_VARIANTS_TO_TUNE = ["dag-gnn", "dag-gnn-gemini", "dag-gnn-claude"]
-    # Or focus: DAG_GNN_VARIANTS_TO_TUNE = ["dag-gnn-gemini", "dag-gnn-claude"]
+    # DATASETS_FOR_TUNING = ["asia_n5000", "asia_n2000", "sachs_continuous"]
+    DATASETS_FOR_TUNING = ["asia_n5000"]
+    N_OPTUNA_TRIALS_PER_DATASET_VARIANT = 100
 
-    DATASETS_FOR_TUNING = ["asia_n2000", "sachs_continuous"]
-    N_OPTUNA_TRIALS_PER_DATASET_VARIANT = 1  # Number of trials for each (dataset, algo_variant) combination
-
-    # Create a directory for all Optuna outputs if it doesn't exist
     ensure_visualization_folder(OPTUNA_OUTPUT_BASE_FOLDER)
 
     if PERFORM_OPTUNA_TUNING:
@@ -399,10 +418,8 @@ if __name__ == "__main__":
                     print(f"Config for dataset '{dataset_name_to_tune}' not found. Skipping Optuna for it.")
                     continue
 
-                # Check if LLM prior file exists if tuning an LLM variant
                 if "gemini" in algo_variant_name or "claude" in algo_variant_name:
                     prior_path_key = "llm_prior_edges_path"
-                    # Get the specific parameter block for this algorithm variant
                     variant_params = dataset_config_for_tuning["algo_params_override"].get(algo_variant_name, {})
                     actual_prior_path = variant_params.get(prior_path_key)
 
@@ -417,7 +434,6 @@ if __name__ == "__main__":
                     print(
                         f"Found LLM prior file for {algo_variant_name} on {dataset_name_to_tune}: {actual_prior_path}")
 
-                # Load n_samples and n_nodes for this dataset to inform Optuna search space
                 try:
                     temp_data, temp_var_names, _ = load_data(dataset_config_for_tuning["data_path"])
                     dataset_config_for_tuning['n_samples_for_batch'] = temp_data.shape[0]
@@ -425,29 +441,26 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(
                         f"Warning: Could not load data for {dataset_name_to_tune} to get n_samples/n_nodes. Using defaults. Error: {e}")
-                    dataset_config_for_tuning['n_samples_for_batch'] = 256  # Fallback
-                    dataset_config_for_tuning['n_nodes_approx'] = 10  # Fallback
+                    dataset_config_for_tuning['n_samples_for_batch'] = dataset_config_for_tuning.get(
+                        'n_samples_for_batch', 256)
+                    dataset_config_for_tuning['n_nodes_approx'] = dataset_config_for_tuning.get('n_nodes_approx', 10)
 
                 print(
                     f"\n--- Optuna for {algo_variant_name.upper()} on {dataset_name_to_tune} (Optimizing F1 Strict Directed) ---")
                 study_name = f"{algo_variant_name}_f1_strict_{dataset_name_to_tune}"
-                # Use a unique database for each study to store results persistently
                 study_db_path = os.path.join(OPTUNA_OUTPUT_BASE_FOLDER, f"{study_name}.db")
                 study = optuna.create_study(
                     study_name=study_name,
-                    storage=f"sqlite:///{study_db_path}",  # Store results in SQLite DB
-                    load_if_exists=True,  # Resume study if it exists
+                    storage=f"sqlite:///{study_db_path}",
+                    load_if_exists=True,
                     direction="maximize",
                     pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
-                    # Adjusted pruner
                 )
 
-                # Pass algo_variant_name to the objective function
                 study.optimize(
                     lambda trial: dagnn_objective(trial, dataset_config_for_tuning, algo_variant_name,
                                                   OPTUNA_OUTPUT_BASE_FOLDER),
                     n_trials=N_OPTUNA_TRIALS_PER_DATASET_VARIANT,
-                    # timeout=600 # Optional: set a timeout for each study.optimize call
                 )
 
                 print(f"\n--- Optuna Tuning Finished for {algo_variant_name.upper()} on {dataset_name_to_tune} ---")
@@ -458,36 +471,33 @@ if __name__ == "__main__":
                     best_trial_overall = study.best_trial
                     print(f"  Study: {study_name}")
                     print(f"  Best Trial Number: {best_trial_overall.number}")
-                    print(f"  Best F1 Strict Directed: {best_trial_overall.value:.4f}")
-
-                    # Safely print execution time
-                    exec_time_val = best_trial_overall.user_attrs.get('execution_time_sec', 'N/A')
-                    exec_time_str = f"{exec_time_val:.2f}s" if isinstance(exec_time_val, (int, float)) else str(
-                        exec_time_val)
-
-                    print(f"  User Attrs: SHD: {best_trial_overall.user_attrs.get('shd_custom_cpdag_vs_dag', 'N/A')}, "
-                          f"F1 Skeleton: {best_trial_overall.user_attrs.get('f1_skeleton', 'N/A')}, "
-                          f"Exec Time: {exec_time_str}")  # Use exec_time_str
+                    print(f"  Best Value (f1_strict_directed): {best_trial_overall.value:.4f}")
+                    print(f"  Metrics for Best Optuna Trial ({best_trial_overall.number}):")
+                    for key, value in best_trial_overall.user_attrs.items():
+                        if isinstance(value, float):
+                            print(f"    {key}: {value:.4f}")
+                        else:
+                            print(f"    {key}: {value}")
 
                     print(f"  Best Params for {algo_variant_name} on {dataset_name_to_tune}:")
                     for key, value in best_trial_overall.params.items():
                         print(f"    {key}: {value}")
 
-                    # Update the main DATASETS_CONFIG with the best found parameters for this variant
                     for i, config_item in enumerate(DATASETS_CONFIG):
                         if config_item["name_id"] == dataset_name_to_tune:
                             if "algo_params_override" not in DATASETS_CONFIG[i]:
                                 DATASETS_CONFIG[i]["algo_params_override"] = {}
 
-                            # Ensure the specific algo_variant_name key exists
+                            # Ensure the specific algo_variant_name key exists, initialize if not
                             if algo_variant_name not in DATASETS_CONFIG[i]["algo_params_override"]:
                                 DATASETS_CONFIG[i]["algo_params_override"][algo_variant_name] = {}
 
-                            # Update with Optuna's best params
-                            DATASETS_CONFIG[i]["algo_params_override"][algo_variant_name].update(
-                                best_trial_overall.params)
+                            # Update with Optuna's best params, preserving existing keys like llm_prior_edges_path
+                            updated_params_for_variant = DATASETS_CONFIG[i]["algo_params_override"][
+                                algo_variant_name].copy()
+                            updated_params_for_variant.update(best_trial_overall.params)
+                            DATASETS_CONFIG[i]["algo_params_override"][algo_variant_name] = updated_params_for_variant
 
-                            # Also save model path and execution time if available
                             saved_model_path = best_trial_overall.user_attrs.get("model_path")
                             if saved_model_path:
                                 DATASETS_CONFIG[i]["algo_params_override"][algo_variant_name][
@@ -499,14 +509,12 @@ if __name__ == "__main__":
                                 print("  Warning: No 'model_path' found in best_trial user_attrs for DAG-GNN variant.")
                             print(
                                 f"  Updated main DATASETS_CONFIG for '{dataset_name_to_tune}' with best Optuna params for '{algo_variant_name}'.")
-                            break  # Found and updated the dataset config
+                            break
             print(f"\n===== Finished Optuna Tuning for Algorithm Variant: {algo_variant_name.upper()} =====")
         print("\nCompleted all Optuna tuning sessions specified.")
 
     print("\n--- Starting Regular Experiment Runs (Potentially with Tuned Params) ---")
     all_run_results = {}
-
-    # Define all algorithms to run in the final evaluation, including tuned LLM variants
     final_algorithms_to_run = ["ges", "pc"] + DAG_GNN_VARIANTS_TO_TUNE
 
     for d_config in DATASETS_CONFIG:
@@ -522,38 +530,40 @@ if __name__ == "__main__":
             experiment_key = f"{d_config['name_id']}_{algo_name_final_run.lower()}"
             print(f"\nRunning final experiment for: {experiment_key}")
 
-            # The d_config should now contain the tuned parameters under algo_params_override[algo_name_final_run]
             result_metrics = run_single_experiment(
-                dataset_config=d_config,  # d_config now contains tuned HPs
+                dataset_config=d_config,
                 algorithm_name=algo_name_final_run,
                 viz_enabled=True,
                 verbose_eval=True
             )
             if result_metrics:
+                print(f"  Final Metrics for {experiment_key}:")
+                for metric_name, metric_value in result_metrics.items():
+                    if isinstance(metric_value, float):
+                        print(f"    {metric_name}: {metric_value:.4f}")
+                    else:
+                        print(f"    {metric_name}: {metric_value}")
                 all_run_results[experiment_key] = result_metrics
             else:
                 print(f"No metrics returned for {experiment_key}.")
 
     print("\n\n--- Overall Experiment Results Summary (After Tuning and Final Runs) ---")
-    # ... (your existing results summary printing code) ...
     if not all_run_results:
         print("No experiments were successfully run or no metrics were collected in the final run phase.")
     else:
         results_summary_df = pd.DataFrame.from_dict(all_run_results, orient='index')
-        # Define your preferred column order for the summary table
         preferred_column_order = [
             'execution_time_sec', 'shd_custom_cpdag_vs_dag', 'f1_skeleton',
             'precision_skeleton', 'recall_skeleton', 'tp_skeleton', 'fp_skeleton', 'fn_skeleton',
             'f1_strict_directed', 'precision_strict_directed', 'recall_strict_directed',
             'tp_strict_directed', 'fp_strict_directed', 'fn_strict_directed'
         ]
-        # Filter for columns that actually exist in the DataFrame
         display_columns = [col for col in preferred_column_order if col in results_summary_df.columns]
 
         if not results_summary_df.empty and display_columns:
             print(results_summary_df[display_columns].to_string(float_format="%.4f"))
             summary_csv_path = os.path.join(MAIN_VIZ_OUTPUT_FOLDER,
-                                            "experiment_results_summary_final.csv")  # Changed name
+                                            "experiment_results_summary_final.csv")
             try:
                 os.makedirs(os.path.dirname(summary_csv_path), exist_ok=True)
                 results_summary_df[display_columns].to_csv(summary_csv_path, float_format="%.4f")

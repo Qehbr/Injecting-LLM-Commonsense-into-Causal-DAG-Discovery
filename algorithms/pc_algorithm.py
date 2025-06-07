@@ -1,111 +1,124 @@
-# project/algorithms/pc_algorithm.py
 import time
 import numpy as np
 from causallearn.search.ConstraintBased.PC import pc as causallearn_pc_algorithm
-from causallearn.utils.cit import fisherz, chisq, \
-    gsq  # For explicitly passing test functions if needed, or use string names
+from causallearn.utils.cit import fisherz, chisq, gsq
 from .base_algorithm import BaseAlgorithm
 
 
 class PCAlgorithm(BaseAlgorithm):
     """
-    Implementation of the PC (Peter-Clark) algorithm using the causallearn library.
+    A wrapper for the PC (Peter-Clark) algorithm from the `causallearn` library.
+
+    This class provides a standardized interface for the PC algorithm, a
+    constraint-based method for causal structure learning. It sets appropriate
+    default conditional independence tests based on the data type and manages
+    algorithm parameters.
+
+    Parameters
+    ----------
+    data_type : str, optional
+        The type of data, either "continuous" or "discrete".
+        Default is "continuous".
+    alpha : float, optional
+        The significance level for the conditional independence tests.
+        Default is 0.05.
+    indep_test_override : str, optional
+        A string to override the default independence test. If not provided,
+        'fisherz' is used for continuous data and 'chisq' for discrete data.
+    stable : bool, optional
+        Whether to use the "stable" version of the PC algorithm, which makes
+        the output order-independent. Default is True.
+    parameters_override : dict, optional
+        A dictionary of additional parameters to pass to the `causallearn` PC
+        function, such as 'uc_rule' or 'uc_priority'.
+
+    Attributes
+    ----------
+    alpha : float
+        The significance level for independence tests.
+    stable : bool
+        Flag for using the stable PC algorithm.
+    indep_test : str
+        The name of the conditional independence test being used.
+    parameters : dict
+        A dictionary of all parameters for the algorithm.
+
     """
 
     def __init__(self, data_type="continuous", alpha=0.05, indep_test_override=None, stable=True,
                  parameters_override=None):
-        super().__init__(data_type)  # Call parent's __init__
+        super().__init__(data_type)
 
         self.alpha = alpha
         self.stable = stable
-        self.parameters = parameters_override if parameters_override is not None else {}  # For any other PC params
+        self.parameters = parameters_override if parameters_override is not None else {}
 
         if indep_test_override:
             self.indep_test = indep_test_override
         elif self.data_type == "discrete":
-            self.indep_test = "chisq"  # Chi-square test for discrete data
-            # self.indep_test = "gsq" # Alternative for discrete data
+            self.indep_test = "chisq"
         elif self.data_type == "continuous":
-            self.indep_test = "fisherz"  # Fisher's Z test (partial correlation) for continuous data
+            self.indep_test = "fisherz"
         else:
             raise ValueError(f"Unsupported data_type '{self.data_type}' for PC default independence tests. "
                              "Must be 'discrete' or 'continuous', or provide indep_test_override.")
 
-        # Merge any additional parameters provided via parameters_override
-        # For PC, alpha and indep_test are primary, but others might exist (e.g. uc_rule, uc_priority)
         self.parameters.setdefault('alpha', self.alpha)
         self.parameters.setdefault('stable', self.stable)
-        # self.parameters.setdefault('verbose', False) # Example if you want to control verbosity
 
     def learn_structure(self, data_np, variable_names=None):
         """
-        Runs the PC algorithm on the provided data.
+        Executes the PC algorithm to learn a causal graph structure.
 
-        Args:
-            data_np (np.ndarray): The input data (samples x variables).
-            variable_names (list, optional): List of variable names.
+        This method first finds the skeleton of the graph by performing a
+        series of conditional independence tests, and then orients the edges
+        to the extent possible, resulting in a Completed Partially Directed
+        Acyclic Graph (CPDAG).
 
-        Populates:
-            self.learned_graph_cpdag_raw: The raw adjacency matrix from causallearn's PC.
-            self.execution_time_seconds: Time taken for the PC algorithm.
-            self.variable_names: Stores the provided variable names.
+        Parameters
+        ----------
+        data_np : np.ndarray
+            The dataset as a NumPy array, where rows are samples and columns
+            are variables.
+        variable_names : list of str, optional
+            The names corresponding to the columns of `data_np`.
 
-        Returns:
-            causallearn.graph.GraphClass.CausalGraph: The CausalGraph object returned by PC.
+        Returns
+        -------
+        causallearn.graph.GeneralGraph.GeneralGraph
+            The CausalGraph object returned by the `causallearn` PC function,
+            which contains the learned graph and other metadata. The raw adjacency
+            matrix can be accessed via `result.G.graph`.
+
         """
-        super().learn_structure(data_np, variable_names)  # Sets self.variable_names
-
-        print(f"Starting PC algorithm with alpha: {self.alpha}, indep_test: '{self.indep_test}', stable: {self.stable}")
-        print(f"  Additional PC parameters: {self.parameters}")  # Print any other params being used
+        super().learn_structure(data_np, variable_names)
         start_time = time.time()
 
-        # Call the causallearn pc function
-        # Pass only the core, known parameters directly, and unpack others from self.parameters
-        # Note: causallearn's pc might not take a 'parameters' dict directly like GES.
-        # It expects them as keyword arguments.
-
-        # Parameters that pc() explicitly takes:
         pc_kwargs = {
             'alpha': self.alpha,
             'indep_test': self.indep_test,
             'stable': self.stable,
             'node_names': self.variable_names,
-            # Add other specific PC parameters from self.parameters if they are known args of pc()
-            'uc_rule': self.parameters.get('uc_rule', 0),  # Default from causallearn docs
-            'uc_priority': self.parameters.get('uc_priority', 2),  # Default from causallearn docs
+            'uc_rule': self.parameters.get('uc_rule', 0),
+            'uc_priority': self.parameters.get('uc_priority', 2),
             'verbose': self.parameters.get('verbose', False),
             'show_progress': self.parameters.get('show_progress', True)
         }
-        # Remove any None values from kwargs if pc function doesn't like them
         pc_kwargs = {k: v for k, v in pc_kwargs.items() if v is not None or k in ['node_names']}
 
         causal_graph_obj = causallearn_pc_algorithm(
             data_np,
             **pc_kwargs
-            # alpha=self.alpha,
-            # indep_test=self.indep_test,
-            # stable=self.stable,
-            # node_names=self.variable_names,
-            # uc_rule=self.parameters.get('uc_rule', 0), # Example: 0: uc_sepset (Default)
-            # uc_priority = self.parameters.get('uc_priority',2) # Example: 2: definiteMaxP
-            # Add other relevant pc parameters here from self.parameters
         )
         end_time = time.time()
         self.execution_time_seconds = end_time - start_time
-        print(f"PC algorithm finished in {self.execution_time_seconds:.3f} seconds.")
 
-        # The learned graph (CPDAG or sometimes PAG depending on variant/settings)
-        # is in causal_graph_obj.G.graph
         if hasattr(causal_graph_obj, 'G') and hasattr(causal_graph_obj.G, 'graph'):
             self.learned_graph_cpdag_raw = causal_graph_obj.G.graph
         else:
-            print("Error: Could not extract graph matrix from PC algorithm output.")
             self.learned_graph_cpdag_raw = np.zeros((data_np.shape[1], data_np.shape[1]), dtype=int)
 
         if self.variable_names and self.learned_graph_cpdag_raw.shape[0] != len(self.variable_names):
-            print("Warning: Shape of learned graph from PC doesn't match number of variable names.")
-            # Fallback if graph is not properly formed or names mismatch
             if self.learned_graph_cpdag_raw.shape[0] != data_np.shape[1]:
                 self.learned_graph_cpdag_raw = np.zeros((data_np.shape[1], data_np.shape[1]), dtype=int)
-
-        return causal_graph_obj  # Return the full CausalGraph object
+        return causal_graph_obj
